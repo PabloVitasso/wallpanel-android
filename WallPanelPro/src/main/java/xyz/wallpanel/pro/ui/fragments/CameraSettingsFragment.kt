@@ -23,6 +23,7 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import androidx.preference.SwitchPreference
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
@@ -123,6 +124,9 @@ class CameraSettingsFragment : BaseSettingsFragment() {
 
         fpsPreference = findPreference<EditTextPreference>(getString(R.string.key_setting_camera_fps)) as EditTextPreference
         val frameSkipPreference = findPreference<EditTextPreference>(getString(R.string.key_setting_camera_motionframeskip)) as EditTextPreference
+        // A number of seconds: the preference XML's inputType does not reach the dialog's field
+        findPreference<EditTextPreference>(getString(R.string.key_setting_camera_wake_time))
+            ?.setOnBindEditTextListener { it.inputType = InputType.TYPE_CLASS_NUMBER }
         cameraPreference = findPreference<SwitchPreference>(PREF_CAMERA_ENABLED) as SwitchPreference
         rotatePreference = findPreference<ListPreference>(PREF_CAMERA_ROTATE) as ListPreference
         rotatePreference!!.setDefaultValue(configuration.cameraRotate)

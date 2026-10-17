@@ -74,12 +74,20 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
     private var userPresent: Boolean = false
     private var hasWakeScreen = false
     private var screenSaverActive = false
+    private var inForeground = false
     var displayProgress = true
     var zoomLevel = 1.0f
 
-    // handler for received data from service
+    /**
+     * Commands from the service. The receiver lives as long as the activity, so commands that
+     * change the page (url, reload, eval, cache) and the wake state apply even while the
+     * screen is off or another screen is in front. Commands that put something on screen, the
+     * screensaver, the settings screen, an alert, are only acted on while the page is what
+     * the user sees, since they would otherwise appear over that other screen.
+     */
     private val mBroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            val inFront = isInForeground() && !isFinishing
             if (BROADCAST_ACTION_LOAD_URL == intent.action) {
                 val url = intent.getStringExtra(BROADCAST_ACTION_LOAD_URL)
                 url?.let {
@@ -97,19 +105,19 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
             } else if (BROADCAST_ACTION_RELOAD_PAGE == intent.action) {
                 stopDisconnectTimer()
                 reload()
-            } else if (BROADCAST_ACTION_SHOW_SCREENSAVER == intent.action && !isFinishing) {
+            } else if (BROADCAST_ACTION_SHOW_SCREENSAVER == intent.action && inFront) {
                 showScreenSaver()
             } else if (BROADCAST_ACTION_HIDE_SCREENSAVER == intent.action && !isFinishing) {
                 // Dismisses the screensaver and starts the inactivity countdown again, so
                 // it comes back on its own the same way it would after a screen touch.
                 resetInactivityTimer()
-            } else if (BROADCAST_ACTION_OPEN_SETTINGS == intent.action) {
+            } else if (BROADCAST_ACTION_OPEN_SETTINGS == intent.action && inFront) {
                 openSettings()
             } else if (BROADCAST_TOAST_MESSAGE == intent.action && !isFinishing) {
                 val message = intent.getStringExtra(BROADCAST_TOAST_MESSAGE)
                 stopDisconnectTimer()
                 Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
-            } else if (BROADCAST_ALERT_MESSAGE == intent.action && !isFinishing) {
+            } else if (BROADCAST_ALERT_MESSAGE == intent.action && inFront) {
                 val message = intent.getStringExtra(BROADCAST_ALERT_MESSAGE)
                 stopDisconnectTimer()
                 message?.let {
@@ -135,7 +143,7 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
             } else if (BROADCAST_BROWSER_ENGINE_PAUSE == intent.action) {
                 Timber.d("Screen off, pausing the browser engine")
                 pauseBrowserEngine()
-            } else if (BROADCAST_BROWSER_ENGINE_RESUME == intent.action && !isFinishing) {
+            } else if (BROADCAST_BROWSER_ENGINE_RESUME == intent.action && inFront) {
                 Timber.d("Screen on, resuming the browser engine")
                 resumeBrowserEngine()
             } else if (BROADCAST_ACTION_RELOAD_PAGE == intent.action && !isFinishing) {
@@ -161,6 +169,8 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
 
         lifecycle.addObserver(dialogUtils)
 
+        registerCommandReceiver()
+
         onUserInteraction()
 
         Thread.setDefaultUncaughtExceptionHandler(AppExceptionHandler(this))
@@ -168,6 +178,29 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        inForeground = true
+        // The screen may have been off while the activity was paused, so make sure the
+        // engine is running again before anything else touches the page.
+        resumeBrowserEngine()
+        resetInactivityTimer()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        inForeground = false
+        // The screensaver belongs to the page: counting down while the settings screen or
+        // another app is in front would bring it up, and dim the screen, over them.
+        inactivityHandler.removeCallbacks(inactivityCallback)
+        // Pausing here also covers being backgrounded by another activity.
+        pauseBrowserEngine()
+    }
+
+    /**
+     * Commands are received for as long as the activity exists, not only while it is in
+     * front: a url, reload or eval command sent while the screen is off, or while another app
+     * or the settings screen is showing, is applied to the page instead of being dropped.
+     */
+    private fun registerCommandReceiver() {
         val filter = IntentFilter()
         filter.addAction(BROADCAST_ACTION_LOAD_URL)
         filter.addAction(BROADCAST_ACTION_JS_EXEC)
@@ -186,22 +219,11 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
         filter.addAction(BROADCAST_BROWSER_ENGINE_PAUSE)
         filter.addAction(BROADCAST_BROWSER_ENGINE_RESUME)
         filter.addAction(BROADCAST_SERVICE_STARTED)
-        val bm = LocalBroadcastManager.getInstance(this)
-        bm.registerReceiver(mBroadcastReceiver, filter)
-        // The screen may have been off while the activity was paused, so make sure the
-        // engine is running again before anything else touches the page.
-        resumeBrowserEngine()
-        resetInactivityTimer()
+        LocalBroadcastManager.getInstance(this).registerReceiver(mBroadcastReceiver, filter)
     }
 
-    override fun onPause() {
-        super.onPause()
-        val bm = LocalBroadcastManager.getInstance(this)
-        bm.unregisterReceiver(mBroadcastReceiver)
-        // The receiver is gone at this point, so the screen off broadcast can no longer arrive.
-        // Pausing here also covers being backgrounded by another activity.
-        pauseBrowserEngine()
-    }
+    /** Between onResume() and onPause(), i.e. the page is what the user sees. */
+    protected fun isInForeground(): Boolean = inForeground
 
     override fun onStart() {
         super.onStart()
@@ -229,6 +251,7 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(mBroadcastReceiver)
         inactivityHandler.removeCallbacks(inactivityCallback)
         // The screensaver goes with the activity. Left unreported, the service keeps
         // publishing it as on and the Home Assistant switch never comes back down.
@@ -322,7 +345,11 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
     protected fun resetInactivityTimer() {
         hideScreenSaver()
         inactivityHandler.removeCallbacks(inactivityCallback)
-        inactivityHandler.postDelayed(inactivityCallback, configuration.inactivityTime)
+        // A command arriving while the page is not in front must not start the countdown,
+        // see onPause(). onResume() starts it.
+        if (isInForeground()) {
+            inactivityHandler.postDelayed(inactivityCallback, configuration.inactivityTime)
+        }
     }
 
     private fun clearInactivityTimer() {
@@ -349,6 +376,7 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
             resetScreenBrightness(false)
         }
         setScreenSaverActive(false)
+        onScreenSaverCovering(false)
     }
 
     /**
@@ -383,8 +411,16 @@ abstract class BaseBrowserActivity : DaggerAppCompatActivity() {
             )
             resetScreenBrightness(true)
             setScreenSaverActive(true)
+            onScreenSaverCovering(true)
         }
     }
+
+    /**
+     * Called when a screensaver that hides the page comes up or goes away. The dim
+     * screensaver leaves the page on view and does not count. Called on every dismissal
+     * attempt, so implementations should ignore a repeat of the current state.
+     */
+    protected open fun onScreenSaverCovering(covering: Boolean) {}
 
     open fun resetScreenBrightness(screenSaver: Boolean = false) {
         screenUtils.resetScreenBrightness(screenSaver)

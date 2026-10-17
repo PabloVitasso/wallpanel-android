@@ -23,6 +23,12 @@
       notification. POST_NOTIFICATIONS is requested at runtime on API 33 and above.
     -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!--
+      Granted by the user from the "Display over other apps" screen. It is what lets a
+      relaunch reopen the browser while the screen is on: the full screen intent above only
+      opens it on a locked or sleeping screen.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!--
       Only requested when the optional shell command feature is enabled, and only useful on
@@ -124,6 +130,7 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
 

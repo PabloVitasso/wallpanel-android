@@ -17,14 +17,17 @@
 package xyz.wallpanel.pro.ui.activities
 
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.view.MenuItem
 import xyz.wallpanel.pro.R
+import xyz.wallpanel.pro.network.WallPanelService
 import xyz.wallpanel.pro.persistence.Configuration
 import xyz.wallpanel.pro.utils.DialogUtils
 import dagger.android.support.DaggerAppCompatActivity
+import timber.log.Timber
 import javax.inject.Inject
 
 class SettingsActivity : DaggerAppCompatActivity() {
@@ -48,6 +51,21 @@ class SettingsActivity : DaggerAppCompatActivity() {
         lifecycle.addObserver(dialogUtils)
     }
 
+    /**
+     * The camera is lent out while this screen is on view, not for as long as it exists: a
+     * settings screen left behind another app would otherwise keep the camera, and motion
+     * and face detection with it, switched off.
+     */
+    override fun onStart() {
+        super.onStart()
+        settingsScreenStarted(this)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        settingsScreenStopped(this)
+    }
+
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         val id = item.itemId
         if (id == android.R.id.home) {
@@ -59,6 +77,46 @@ class SettingsActivity : DaggerAppCompatActivity() {
 
     companion object {
         const val PERMISSIONS_REQUEST_WRITE_SETTINGS = 200
+
+        // Settings screens stopped for a rotation, by class name, whose next start is the
+        // same screen coming back
+        private val screensChangingConfiguration = mutableSetOf<String>()
+
+        /**
+         * Called from onStart() of a screen that needs the camera lent out, the settings and
+         * the camera test. A rotation recreates the screen, and it is not reported as the
+         * screen closing and opening again: in between, the service would take the camera
+         * back from under the camera test, and reopen it for nothing under the settings.
+         */
+        fun settingsScreenStarted(activity: Activity) {
+            if (!screensChangingConfiguration.remove(activity.javaClass.name)) {
+                notifySettingsShown(activity, true)
+            }
+        }
+
+        /** Called from onStop(), see [settingsScreenStarted]. */
+        fun settingsScreenStopped(activity: Activity) {
+            if (activity.isChangingConfigurations) {
+                screensChangingConfiguration.add(activity.javaClass.name)
+            } else {
+                notifySettingsShown(activity, false)
+            }
+        }
+
+        /**
+         * Tells the service a settings screen came into or left view. The service keeps
+         * running while the settings are open and only lends out the camera, for the camera
+         * test, see WallPanelService.onStartCommand(). The screen calling is in front, which
+         * is what Android requires to start a service.
+         */
+        private fun notifySettingsShown(context: Context, shown: Boolean) {
+            val action = if (shown) WallPanelService.ACTION_SETTINGS_OPENED else WallPanelService.ACTION_SETTINGS_CLOSED
+            try {
+                context.startService(Intent(context, WallPanelService::class.java).setAction(action))
+            } catch (e: IllegalStateException) {
+                Timber.w(e, "Unable to tell the service about the settings screen")
+            }
+        }
         fun createStartIntent(context: Context): Intent {
             return Intent(context, SettingsActivity::class.java)
         }

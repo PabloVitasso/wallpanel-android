@@ -163,7 +163,7 @@
     <string name="pref_show_browser_activity_summary">Display browser loading progress.</string>
     <string name="pref_prevent_sleep_summary">When active, keeps the screen on.</string>
     <string name="pref_start_boot_summary">Will start the application upon system boot.</string>
-    <string name="pref_zoom_level_summary">Zooms the browser level (experimental).</string>
+    <string name="pref_zoom_level_summary">Zooms the browser level (experimental). With GeckoView, a change applies the next time the app starts.</string>
     <string name="pref_additional_settings_title">Additional Settings</string>
     <string name="pref_application_settings_title">Application Settings</string>
     <string name="pref_face_detection_title">Face Detection</string>
@@ -216,6 +216,8 @@
     <string name="pref_camera_motionframeskip_summary">Process motion detection every Nth frame to reduce CPU usage. Higher values = lower CPU, slower detection. Set to 0 to disable frame skipping (default is 5).</string>
     <string name="pref_camera_only_screensaver_title">Camera Only During Screensaver</string>
     <string name="pref_camera_only_screensaver_summary">Only activate camera when screensaver is active to save CPU and battery.</string>
+    <string name="pref_camera_wake_time_title">Screen On After Detection</string>
+    <string name="pref_camera_wake_time_summary">Seconds the screen stays on when motion or a face wakes it. 0 uses the screensaver\'s inactivity time.</string>
     <string name="pref_camera_resolution_title">Camera Resolution</string>
     <string name="pref_camera_resolution_summary">The size the camera runs at. Lower sizes use less CPU; motion detection works the same at every size. A camera that does not support the size picked opens at the closest one it has.</string>
     <string-array name="camera_resolution_names">
@@ -256,6 +258,16 @@
     <string name="dialog_message_ssl_untrusted">The certificate authority is not trusted.</string>
     <string name="dialog_message_ssl_generic">SSL certificate error.</string>
     <string name="dialog_message_invalid_intent">Invalid Intent URI received</string>
+    <string name="toast_no_app_for_link">No app on this device can open that link</string>
+    <string name="toast_geckoview_failed">GeckoView failed to start, using WebView</string>
+    <string name="title_setting_overlay_permission">Reopen After a Restart</string>
+    <string name="pref_overlay_permission_granted">Allowed. The dashboard comes back by itself after a crash or a restart.</string>
+    <string name="pref_overlay_permission_denied">Not allowed. Tap to allow Display over other apps: without it, Android keeps the dashboard closed after a crash or a restart while the screen is on.</string>
+    <string name="dialog_overlay_permission_title">Reopen the dashboard by itself?</string>
+    <string name="dialog_overlay_permission_message">Android only lets WallPanel bring the dashboard back after a crash or a restart, while the screen is on, if it may display over other apps. Allow it on the next screen.</string>
+    <string name="toast_overlay_settings_missing">This device has no setting for displaying over other apps</string>
+    <string name="hint_username">Username</string>
+    <string name="hint_password">Password</string>
     <string name="dialog_missing_webview_warning">This device does not have the WebView component installed, please install the component from the Google Play store.</string>
     <string name="error_missing_vision_lib">Missing appropriate libraries to process Face detection or Barcode reading. These features may not work on this device.</string>
     <string name="toast_empty_url">Url is empty…</string>

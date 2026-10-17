@@ -16,14 +16,21 @@
 
 package xyz.wallpanel.pro
 
-import android.app.Activity
+import android.content.Context
 import timber.log.Timber
 import xyz.wallpanel.pro.utils.AppRestartHelper
 
-class AppExceptionHandler(private val activity: Activity) : Thread.UncaughtExceptionHandler {
+/**
+ * Restarts the application after an uncaught exception. It is the process-wide default
+ * handler, so it holds the application context only: holding an activity kept every browser
+ * activity it was installed from, with its WebView or GeckoView, alive for good.
+ */
+class AppExceptionHandler(context: Context) : Thread.UncaughtExceptionHandler {
+
+    private val appContext = context.applicationContext
+
     override fun uncaughtException(thread: Thread, ex: Throwable) {
         Timber.e(ex, "Uncaught exception on thread ${thread.name}, restarting the application")
-        activity.finish()
-        AppRestartHelper.restartApplication(activity)
+        AppRestartHelper.restartApplication(appContext)
     }
 }

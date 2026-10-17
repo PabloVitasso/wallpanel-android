@@ -45,6 +45,11 @@
             android:title="@string/title_setting_android_startonboot"
             android:summary="@string/pref_start_boot_summary"/>
 
+        <Preference
+            android:key="button_overlay_permission"
+            android:title="@string/title_setting_overlay_permission"
+            android:summary="@string/pref_overlay_permission_denied"/>
+
         <SwitchPreference
             android:defaultValue="false"
             android:key="@string/key_setting_app_showactivity"

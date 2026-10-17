@@ -17,6 +17,7 @@
 package xyz.wallpanel.pro.utils
 
 import android.Manifest
+import android.app.ActivityOptions
 import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -26,6 +27,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.core.app.NotificationCompat
@@ -109,12 +111,34 @@ object AppRestartHelper {
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP
                 or Intent.FLAG_ACTIVITY_CLEAR_TASK
                 or Intent.FLAG_ACTIVITY_NEW_TASK)
+        // A fresh pending intent each time: updating an existing one keeps the options it
+        // was created with, so one left from an older version would miss creatorOptions().
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE
         } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
+            PendingIntent.FLAG_CANCEL_CURRENT
         }
-        return PendingIntent.getActivity(context, RELAUNCH_REQUEST_CODE, intent, flags)
+        return PendingIntent.getActivity(context, RELAUNCH_REQUEST_CODE, intent, flags, creatorOptions())
+    }
+
+    /**
+     * Lets the relaunch use this application's own right to start an activity from the
+     * background, which the "display over other apps" permission gives it. From target SDK 35
+     * a pending intent no longer carries that right unless its creator says so.
+     */
+    private fun creatorOptions(): Bundle? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return null
+        }
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+        } else {
+            @Suppress("DEPRECATION")
+            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+        }
+        return ActivityOptions.makeBasic()
+            .setPendingIntentCreatorBackgroundActivityStartMode(mode)
+            .toBundle()
     }
 
     private fun postRestartNotification(context: Context, pendingIntent: PendingIntent) {

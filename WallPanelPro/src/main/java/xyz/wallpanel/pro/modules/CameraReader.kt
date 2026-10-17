@@ -182,6 +182,10 @@ constructor(private val context: Context) {
     @SuppressLint("MissingPermission")
     @Throws(IOException::class)
     fun startCameraPreview(callback: CameraCallback, configuration: Configuration, preview: CameraSourcePreview?) {
+        // The camera test keeps this reader across a rotation and starts it again for the
+        // new screen. Without the stop, the source and detectors of the old screen are
+        // replaced without being released, and Android evicts the camera from under them.
+        stopCamera()
         if (configuration.cameraEnabled && preview != null) {
             this.cameraCallback = callback
             this.cameraPreview = preview
@@ -220,6 +224,10 @@ constructor(private val context: Context) {
     @SuppressLint("MissingPermission")
     @Throws(IOException::class)
     fun startCameraPreviewSolo(callback: CameraCallback, configuration: Configuration, preview: CameraSourcePreview?) {
+        // The camera test keeps this reader across a rotation and starts it again for the
+        // new screen. Without the stop, the source and detectors of the old screen are
+        // replaced without being released, and Android evicts the camera from under them.
+        stopCamera()
         if (configuration.cameraEnabled && preview != null) {
             this.cameraCallback = callback
             this.cameraPreview = preview

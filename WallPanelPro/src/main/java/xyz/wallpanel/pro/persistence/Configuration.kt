@@ -93,6 +93,12 @@ constructor(private val context: Context, private val sharedPreferences: SharedP
             sharedPreferences.edit().putBoolean(PREF_NOTIFICATION_PERMISSIONS, value).apply()
         }
 
+    var overlayPermissionShown: Boolean
+        get() = sharedPreferences.getBoolean(PREF_OVERLAY_PERMISSION, false)
+        set(value) {
+            sharedPreferences.edit().putBoolean(PREF_OVERLAY_PERMISSION, value).apply()
+        }
+
     var cameraRotate: Float
         get() = this.sharedPreferences.getString(PREF_CAMERA_ROTATE, "0f")?.trim()?.toFloatOrNull() ?: 0f
         set(value) = this.sharedPreferences.edit().putString(PREF_CAMERA_ROTATE, value.toString()).apply()
@@ -398,6 +404,17 @@ constructor(private val context: Context, private val sharedPreferences: SharedP
             5
         }
 
+    /**
+     * How long, in milliseconds, motion or a face keeps the screen on once it wakes it. The
+     * setting is in seconds; 0 follows the screensaver's inactivity time, as the wake command
+     * does without a wakeTime.
+     */
+    val cameraWakeTimeMillis: Long
+        get() {
+            val seconds = getIntPref(R.string.key_setting_camera_wake_time, R.string.default_setting_camera_wake_time)
+            return if (seconds > 0) seconds * 1000L else inactivityTime
+        }
+
     val cameraOnlyWhenScreenSaver: Boolean
         get() = getBoolPref(R.string.key_setting_camera_only_screensaver, R.string.default_camera_only_screensaver)
 
@@ -566,6 +583,11 @@ constructor(private val context: Context, private val sharedPreferences: SharedP
         return updates
     }
 
+    /** Has the dashboard load again when the browser next comes to the front. */
+    fun requestBrowserReload() {
+        settingsUpdated()
+    }
+
     private fun settingsUpdated() {
         sharedPreferences.edit().putBoolean(PREF_BROWSER_SETTINGS_UPDATED, true).apply()
     }
@@ -583,6 +605,7 @@ constructor(private val context: Context, private val sharedPreferences: SharedP
         const val PREF_CAMERA_PERMISSIONS = "pref_camera_permissions"
         const val PREF_SHELL_PERMISSIONS = "pref_shell_permissions"
         const val PREF_NOTIFICATION_PERMISSIONS = "pref_notification_permissions"
+        const val PREF_OVERLAY_PERMISSION = "pref_overlay_permission"
         const val PREF_CAMERA_ROTATE = "pref_camera_rotate"
         const val PREF_BROWSER_REFRESH_DISCONNECT = "pref_browser_refresh_disconnect"
         const val PREF_SCREEN_BRIGHTNESS = "pref_use_screen_brightness"

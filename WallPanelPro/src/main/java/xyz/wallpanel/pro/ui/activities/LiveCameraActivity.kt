@@ -31,9 +31,9 @@ import android.view.WindowManager
 import android.widget.Toast
 import xyz.wallpanel.pro.R
 import xyz.wallpanel.pro.modules.CameraCallback
+import xyz.wallpanel.pro.network.WallPanelService
 import xyz.wallpanel.pro.persistence.Configuration
 import xyz.wallpanel.pro.ui.DetectionViewModel
-import xyz.wallpanel.pro.ui.views.CameraSourcePreview
 import dagger.android.support.DaggerAppCompatActivity
 import timber.log.Timber
 import xyz.wallpanel.pro.databinding.ActivityLiveCameraBinding
@@ -49,7 +49,6 @@ class LiveCameraActivity : DaggerAppCompatActivity() {
     private var updateHandler: Handler? = null
     private var removeTextCountdown: Int = 0
     private val interval = 1000/15L
-    private var preview: CameraSourcePreview? = null
     private var toastShown = false
     private var toast: Toast? = null
 
@@ -89,7 +88,7 @@ class LiveCameraActivity : DaggerAppCompatActivity() {
         // Check for the camera permission before accessing the camera.
         val rc = ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
         if (rc == PackageManager.PERMISSION_GRANTED) {
-            viewModel.startCameraPreview(cameraCallback, binding.imageViewPreview)
+            startCameraPreview()
         } else {
             requestCameraPermission()
         }
@@ -113,11 +112,15 @@ class LiveCameraActivity : DaggerAppCompatActivity() {
 
     public override fun onStart() {
         super.onStart()
+        // Counted as a settings screen: it covers the settings while it runs, and the
+        // service must not take the camera back from under it.
+        SettingsActivity.settingsScreenStarted(this)
         startUpdatePicture()
     }
 
     public override fun onStop() {
         super.onStop()
+        SettingsActivity.settingsScreenStopped(this)
         if(toast != null) {
             toast!!.cancel()
         }
@@ -151,10 +154,26 @@ class LiveCameraActivity : DaggerAppCompatActivity() {
             return
         }
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            viewModel.startCameraPreview(cameraCallback, preview!!)
+            startCameraPreview()
             return
         }
         Toast.makeText(this, getString(R.string.toast_write_permissions_denied), Toast.LENGTH_LONG).show()
+    }
+
+    /**
+     * The settings screen has the service close its camera, but the close runs on the
+     * service's camera thread and can still be under way, on a slow device or behind an open
+     * that had not finished. The preview waits for it rather than finding the camera in use.
+     */
+    private fun startCameraPreview() {
+        Thread {
+            WallPanelService.awaitCameraReleasedForSettings(CAMERA_RELEASE_WAIT_MS)
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    viewModel.startCameraPreview(cameraCallback, binding.imageViewPreview)
+                }
+            }
+        }.start()
     }
 
     private fun startUpdatePicture() {
@@ -225,5 +244,6 @@ class LiveCameraActivity : DaggerAppCompatActivity() {
 
     companion object {
         const val PERMISSIONS_REQUEST_CAMERA = 201
+        private const val CAMERA_RELEASE_WAIT_MS = 5000L
     }
 }
