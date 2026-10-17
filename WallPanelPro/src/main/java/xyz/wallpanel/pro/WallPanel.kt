@@ -17,7 +17,6 @@
 package xyz.wallpanel.pro
 
 import android.R.attr
-import android.content.ComponentCallbacks2
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -117,38 +116,13 @@ class WallPanel : DaggerApplication() {
         MultiDex.install(this)
     }
 
-    override fun onLowMemory() {
-        super.onLowMemory()
-        System.gc()
-    }
-
+    /**
+     * Logged only. The runtime already collects under memory pressure, so forcing a
+     * collection here only adds work on the main thread, and throwing for a level this code
+     * does not know would crash the application the first time Android sends one.
+     */
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        when (level) {
-            ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> {
-                Timber.v("The user interface has moved to the background.")
-                Runtime.getRuntime().gc()
-            }
-            ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
-            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
-            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> {
-                Timber.v("If the event is TRIM_MEMORY_RUNNING_CRITICAL, then the system will begin killing background processes.")
-                Runtime.getRuntime().gc()
-            }
-            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
-            ComponentCallbacks2.TRIM_MEMORY_MODERATE,
-            ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> {
-                Timber.v("If the event is TRIM_MEMORY_COMPLETE, the process will be one of the first to be terminated.")
-                //val processId: Int = Process.myPid()
-                //Process.killProcess(processId)
-                Runtime.getRuntime().gc()
-            }
-            else -> {
-                Timber.v("The app received an unrecognized memory level value from the system. Treat this as a generic low-memory message.")
-                throw IllegalStateException("Unexpected value: $level")
-            }
-        }
+        Timber.i("Memory trim requested, level $level")
     }
-
-
 }

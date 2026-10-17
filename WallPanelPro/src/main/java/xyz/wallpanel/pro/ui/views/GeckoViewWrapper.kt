@@ -44,6 +44,7 @@ class GeckoViewWrapper(
     private var permissionDelegate: GeckoSession.PermissionDelegate? = null
     private var promptDelegate: GeckoSession.PromptDelegate? = null
     private var contentDelegate: GeckoSession.ContentDelegate? = null
+    private var scrollDelegate: GeckoSession.ScrollDelegate? = null
 
     companion object {
         private var runtime: GeckoRuntime? = null
@@ -51,10 +52,18 @@ class GeckoViewWrapper(
         /**
          * Initialize the GeckoRuntime (should be called once per app lifecycle)
          */
-        fun initializeRuntime(context: Context) {
+        fun initializeRuntime(context: Context, zoomLevel: Float, darkTheme: Boolean) {
             if (runtime == null) {
                 // Configure GeckoRuntime with optimal settings
                 val builder = GeckoRuntimeSettings.Builder()
+
+                // The browser zoom setting. Gecko fixes the display density when the runtime
+                // starts, so a change applies the next time the application starts.
+                if (zoomLevel > 0f && zoomLevel != 1.0f) {
+                    builder.displayDensityOverride(context.resources.displayMetrics.density * zoomLevel)
+                }
+
+                builder.preferredColorScheme(colorScheme(darkTheme))
                 
                 // Enable JavaScript (equivalent to WebView's javaScriptEnabled)
                 builder.javaScriptEnabled(true)
@@ -82,11 +91,39 @@ class GeckoViewWrapper(
         /**
          * Get the shared GeckoRuntime instance
          */
-        fun getRuntime(context: Context): GeckoRuntime {
-            if (runtime == null) {
-                initializeRuntime(context)
+        private fun getRuntime(): GeckoRuntime {
+            return runtime ?: throw IllegalStateException("initializeRuntime() has not been called")
+        }
+
+        /**
+         * Follows the dark theme setting rather than the system theme, as the WebView does.
+         * Without this, a device in system dark mode shows a dark dashboard with the setting off.
+         */
+        fun setDarkTheme(darkTheme: Boolean) {
+            runtime?.settings?.preferredColorScheme = colorScheme(darkTheme)
+        }
+
+        private fun colorScheme(darkTheme: Boolean): Int {
+            return if (darkTheme) {
+                GeckoRuntimeSettings.COLOR_SCHEME_DARK
+            } else {
+                GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
             }
-            return runtime!!
+        }
+
+        /**
+         * Clears the network and image caches, so the next load fetches everything again.
+         * Cookies and site storage stay: Home Assistant keeps its login in local storage,
+         * and clearing that would put the kiosk on the login page.
+         *
+         * @return false when GeckoView has not been started in this process.
+         */
+        fun clearRuntimeCaches(): Boolean {
+            val geckoRuntime = runtime ?: return false
+            geckoRuntime.storageController.clearData(
+                org.mozilla.geckoview.StorageController.ClearFlags.ALL_CACHES
+            )
+            return true
         }
 
         /**
@@ -133,7 +170,7 @@ class GeckoViewWrapper(
                 Timber.e(e, "Error releasing dead GeckoSession from the view")
             }
             geckoSession = openSession()
-            Timber.i("GeckoSession recreated after content process death")
+            Timber.i("GeckoSession recreated")
             true
         } catch (e: Exception) {
             Timber.e(e, "Error recreating GeckoSession")
@@ -146,7 +183,7 @@ class GeckoViewWrapper(
      * and attach it to the view.
      */
     private fun openSession(): GeckoSession {
-        val runtime = getRuntime(context)
+        val runtime = getRuntime()
         val session = GeckoSession()
         applyDelegates(session)
         session.open(runtime)
@@ -163,6 +200,7 @@ class GeckoViewWrapper(
         permissionDelegate?.let { session.permissionDelegate = it }
         promptDelegate?.let { session.promptDelegate = it }
         contentDelegate?.let { session.contentDelegate = it }
+        scrollDelegate?.let { session.scrollDelegate = it }
     }
 
     /**
@@ -170,6 +208,19 @@ class GeckoViewWrapper(
      */
     private fun closeSessionQuietly() {
         val session = geckoSession ?: return
+        // Gecko can keep a closed session reachable from native code (its accessibility
+        // provider does), and the delegates lead from the session back to the activity.
+        // Detached, the activity can be collected even when the session cannot.
+        try {
+            session.navigationDelegate = null
+            session.progressDelegate = null
+            session.permissionDelegate = null
+            session.promptDelegate = null
+            session.contentDelegate = null
+            session.scrollDelegate = null
+        } catch (e: Exception) {
+            Timber.e(e, "Error detaching the GeckoSession delegates")
+        }
         try {
             if (session.isOpen) {
                 session.close()
@@ -192,16 +243,6 @@ class GeckoViewWrapper(
      */
     fun reload() {
         geckoSession?.reload()
-    }
-
-    /**
-     * Clear cache and data
-     */
-    fun clearCache(includeDiskFiles: Boolean = true) {
-        // Clear session data using runtime storage controller
-        runtime?.storageController?.clearData(
-            org.mozilla.geckoview.StorageController.ClearFlags.ALL
-        )
     }
 
     /**
@@ -283,6 +324,14 @@ class GeckoViewWrapper(
     }
 
     /**
+     * Set scroll delegate, which reports how far the page is scrolled
+     */
+    fun setScrollDelegate(delegate: GeckoSession.ScrollDelegate) {
+        scrollDelegate = delegate
+        geckoSession?.scrollDelegate = delegate
+    }
+
+    /**
      * Set user agent
      */
     fun setUserAgent(userAgent: String) {
@@ -308,28 +357,5 @@ class GeckoViewWrapper(
      */
     fun destroy() {
         suspend()
-    }
-
-    /**
-     * Go back in navigation history
-     */
-    fun canGoBack(): Boolean {
-        // GeckoView handles this through GeckoSession.goBack()
-        return false // Will be properly implemented with navigation delegate
-    }
-
-    /**
-     * Go back in navigation
-     */
-    fun goBack() {
-        geckoSession?.goBack()
-    }
-
-    /**
-     * Get current URL
-     */
-    fun getUrl(): String? {
-        // URL tracking will be done through NavigationDelegate
-        return null
     }
 }

@@ -29,6 +29,7 @@ import android.media.MediaPlayer
 import android.net.wifi.WifiManager
 import android.os.*
 import android.view.Display
+import androidx.annotation.WorkerThread
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.Observer
@@ -92,6 +93,9 @@ import java.nio.ByteBuffer
 import java.util.*
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -104,6 +108,13 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
     lateinit var configuration: Configuration
 
     private var cameraReader: CameraReader? = null
+    // The settings screen is open and may need the camera for its camera test
+    private var cameraReleasedForSettings = false
+    // Settings and camera test screens on view: the camera test covers the settings screen, so
+    // the camera comes back only when neither is
+    private var settingsScreensShown = 0
+    // When the current screen wake, from a command or a detection, runs out (elapsed realtime)
+    private var screenWakeUntil = 0L
     // Whether the camera has been handed to [cameraExecutor] to open and not stopped since.
     // Set from the command threads and from the camera thread's error callback, read on the
     // main looper when a service start reconciles the settings.
@@ -292,6 +303,21 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val result = super.onStartCommand(intent, flags, startId)
+        // The service keeps running while the settings screen is open, so MQTT and HTTP stay
+        // reachable; only the camera is handed over, for the camera test. Closing the screen
+        // gives it back below, opened with whatever the screen changed.
+        when (intent?.action) {
+            ACTION_SETTINGS_OPENED -> {
+                settingsScreensShown++
+                releaseCameraForSettings()
+            }
+            ACTION_SETTINGS_CLOSED -> {
+                settingsScreensShown = (settingsScreensShown - 1).coerceAtLeast(0)
+                if (settingsScreensShown == 0) {
+                    cameraReleasedForSettings = false
+                }
+            }
+        }
         // Opening settings normally stops the service, so a reconnect republishes. The
         // launcher shortcut goes straight to the settings screen and leaves the service
         // running, so any setting that changed what the configs say is caught here instead.
@@ -433,9 +459,16 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
         sensorReader.stopReadings()
         stopHttp()
         stopPowerOptions()
+        // Every handler, so no message still waiting in the main queue holds on to the
+        // destroyed service.
         reconnectHandler.removeCallbacksAndMessages(null)
         mjpegHandler.removeCallbacksAndMessages(null)
         cameraProfileHandler.removeCallbacksAndMessages(null)
+        motionClearHandler.removeCallbacksAndMessages(null)
+        appStateClearHandler.removeCallbacksAndMessages(null)
+        qrCodeClearHandler.removeCallbacksAndMessages(null)
+        faceClearHandler.removeCallbacksAndMessages(null)
+        wakeScreenHandler.removeCallbacksAndMessages(null)
         discoveryExecutor.shutdown()
     }
 
@@ -693,7 +726,7 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
      * caller would park the main looper behind a camera command from the broker.
      */
     private fun configureCamera() {
-        if (!configuration.cameraEnabled) {
+        if (!configuration.cameraEnabled || cameraReleasedForSettings) {
             return
         }
         // The camera can be switched on without the permission to use it: the setting comes
@@ -787,11 +820,11 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
         cameraProfileHandler.post { applyCameraProfile() }
     }
 
-    private fun submitCamera(work: () -> Unit) {
-        try {
+    private fun submitCamera(work: () -> Unit): Future<*>? {
+        return try {
             // An exception thrown on this thread takes the whole process down, and setting
             // up the detectors is not covered by the camera's own error handling.
-            cameraExecutor.execute {
+            cameraExecutor.submit(Runnable {
                 try {
                     work()
                 } catch (e: Exception) {
@@ -799,9 +832,10 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
                     cameraRunning = false
                     sendToastMessage(getString(R.string.toast_camera_source_error))
                 }
-            }
+            })
         } catch (e: RejectedExecutionException) {
             Timber.d("Not touching the camera, the service is shutting down")
+            null
         }
     }
 
@@ -967,6 +1001,30 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
             startMJPEG()
         }
         publishDiscovery()
+        publishApplicationState()
+    }
+
+    /**
+     * Closes the camera without switching it off in the settings, while the settings screen
+     * is open. The setting stays as it was, so closing the screen opens the camera again.
+     */
+    private fun releaseCameraForSettings() {
+        if (cameraReleasedForSettings) {
+            return
+        }
+        cameraReleasedForSettings = true
+        if (!cameraRunning) {
+            return
+        }
+        Timber.i("Releasing the camera while the settings screen is open")
+        cameraProfileHandler.removeCallbacks(endCameraBoostRunnable)
+        cameraBoosted = false
+        stopMJPEG()
+        val reader = cameraReader
+        cameraRunning = false
+        // The camera executor runs one task at a time, so this also waits out an open that
+        // is still under way
+        cameraReleaseForSettings = submitCamera { reader?.stopCamera() }
         publishApplicationState()
     }
 
@@ -1254,6 +1312,7 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
         // release always end together.
         releaseScreenWakeLock()
         screenWakeLock?.acquire(wakeTime)
+        screenWakeUntil = SystemClock.elapsedRealtime() + wakeTime
         wakeScreenHandler.removeCallbacks(clearWakeScreenRunnable)
         wakeScreenHandler.postDelayed(clearWakeScreenRunnable, wakeTime)
         sendWakeScreenOn()
@@ -1276,6 +1335,25 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
         } catch (e: RuntimeException) {
             Timber.w(e, "The screen wake lock was already released")
         }
+    }
+
+    /**
+     * Turns the screen on for motion or a face, the same way the wake command does, and keeps
+     * it on for [Configuration.cameraWakeTimeMillis]. Only the screen wake lock turns on a
+     * screen that is off; the CPU wake lock the service holds anyway does not.
+     *
+     * A detection only ever extends the wake: while more than half of [wakeTime] is left on
+     * the current one, from an earlier detection or from a longer wake command, it is left
+     * alone. That also keeps the lock from being taken anew on every frame while someone
+     * moves about. Runs on the main looper.
+     */
+    private fun wakeForDetection() {
+        val wakeTime = configuration.cameraWakeTimeMillis
+        val remaining = screenWakeUntil - SystemClock.elapsedRealtime()
+        if (screenWakeLock?.isHeld == true && remaining > wakeTime / 2) {
+            return
+        }
+        wakeScreenOn(wakeTime)
     }
 
     private val clearWakeScreenRunnable = Runnable {
@@ -1782,12 +1860,11 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
             }
             
             Timber.i("Motion detected")
-            if (configuration.cameraMotionWake) {
-                configurePowerOptions()
-                wakeScreen()
-            }
             // Called on the camera's detector thread.
             motionClearHandler.post {
+                if (configuration.cameraMotionWake) {
+                    wakeForDetection()
+                }
                 publishMotionDetected()
                 boostCamera()
             }
@@ -1805,8 +1882,8 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
             
             Timber.i("Face detected")
             if (configuration.cameraFaceWake) {
-                configurePowerOptions()
-                wakeScreen() // temp turn on screen
+                // Called on the camera's detector thread.
+                motionClearHandler.post { wakeForDetection() }
             }
             publishFaceDetected()
         }
@@ -1840,6 +1917,8 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
         const val BROADCAST_SCREENSAVER_STOPPED = "BROADCAST_SCREENSAVER_STOPPED"
         const val BROADCAST_CONNTED = "BROADCAST_SCREEN_BRIGHTNESS_CHANGE"
         const val ACTION_RUN_COMMAND = "xyz.wallpanel.pro.action.RUN_COMMAND"
+        const val ACTION_SETTINGS_OPENED = "xyz.wallpanel.pro.action.SETTINGS_OPENED"
+        const val ACTION_SETTINGS_CLOSED = "xyz.wallpanel.pro.action.SETTINGS_CLOSED"
         const val EXTRA_COMMAND_JSON = "EXTRA_COMMAND_JSON"
 
         /**
@@ -1863,5 +1942,27 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
         // The full output rides along as an attribute. Home Assistant keeps attributes in
         // every state it records, so an unbounded one is paid for on every update.
         private const val SHELL_OUTPUT_MAX_LENGTH = 16384
+
+        // The service closing the camera it lent to the settings screens, null once nothing
+        // is pending. The service and the camera test share the process.
+        @Volatile
+        private var cameraReleaseForSettings: Future<*>? = null
+
+        /**
+         * Blocks until the service has closed the camera for the settings screens, or for
+         * [timeoutMs] at most, so the camera test does not try to open it while the service
+         * still has it. Off the main thread only.
+         */
+        @WorkerThread
+        fun awaitCameraReleasedForSettings(timeoutMs: Long) {
+            val release = cameraReleaseForSettings ?: return
+            try {
+                release.get(timeoutMs, TimeUnit.MILLISECONDS)
+            } catch (e: TimeoutException) {
+                Timber.w("The service is still closing the camera, opening it anyway")
+            } catch (e: Exception) {
+                Timber.w(e, "Waiting for the service to close the camera")
+            }
+        }
     }
 }

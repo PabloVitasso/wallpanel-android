@@ -44,9 +44,11 @@ import xyz.wallpanel.pro.R
 import xyz.wallpanel.pro.persistence.Configuration.Companion.PREF_SCREENSAVER_DIM_VALUE
 import xyz.wallpanel.pro.persistence.Configuration.Companion.PREF_SCREEN_BRIGHTNESS
 import xyz.wallpanel.pro.ui.activities.SettingsActivity.Companion.PERMISSIONS_REQUEST_WRITE_SETTINGS
+import xyz.wallpanel.pro.ui.views.GeckoViewWrapper
 import xyz.wallpanel.pro.ui.views.SettingsCodeView
 import xyz.wallpanel.pro.utils.DateUtils
 import xyz.wallpanel.pro.utils.DateUtils.SECONDS_VALUE
+import xyz.wallpanel.pro.utils.OverlayPermission
 import xyz.wallpanel.pro.utils.ScreenUtils
 import dagger.android.support.AndroidSupportInjection
 import timber.log.Timber
@@ -77,6 +79,7 @@ class SettingsFragment : BaseSettingsFragment() {
     private var aboutPreference: Preference? = null
     private var brightnessPreference: Preference? = null
     private var clearCachePreference: Preference? = null
+    private var overlayPermissionPreference: Preference? = null
     private var browserRefreshPreference: SwitchPreference? = null
 
     private var clockSaverPreference: SwitchPreference? = null
@@ -254,6 +257,8 @@ class SettingsFragment : BaseSettingsFragment() {
         aboutPreference = findPreference("button_key_about")
         brightnessPreference = findPreference("button_key_brightness")
         clearCachePreference = findPreference("button_clear_cache")
+        overlayPermissionPreference = findPreference("button_overlay_permission")
+        overlayPermissionPreference?.isVisible = OverlayPermission.isNeeded()
 
         rotationPreference = findPreference("pref_settings_image_rotation")
         rotationPreference?.text = configuration.imageRotation.toString()
@@ -325,10 +330,27 @@ class SettingsFragment : BaseSettingsFragment() {
                 clearBrowserCache()
                 true
             }
+
+            overlayPermissionPreference?.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+                OverlayPermission.openSettings(requireContext())
+                true
+            }
         }  catch (e: IllegalArgumentException) {
             // Add debug if required
             // Timber.d(e.message)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The permission is granted on a system screen, so it is read again on the way back.
+        overlayPermissionPreference?.summary = getString(
+            if (OverlayPermission.isGranted(requireContext())) {
+                R.string.pref_overlay_permission_granted
+            } else {
+                R.string.pref_overlay_permission_denied
+            }
+        )
     }
 
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
@@ -590,23 +612,27 @@ class SettingsFragment : BaseSettingsFragment() {
             .setMessage(R.string.pref_clear_cache_confirm)
             .setPositiveButton(android.R.string.ok) { _, _ ->
                 try {
-                    // Clear WebView cache
-                    android.webkit.WebView(requireContext()).apply {
-                        clearCache(true)
-                        clearHistory()
-                        clearFormData()
+                    if (configuration.useGeckoView) {
+                        // Through Gecko itself: its cache lives under the application's cache
+                        // directory, and deleting that under a running Gecko leaves it without one.
+                        GeckoViewWrapper.initializeRuntime(
+                            requireContext(), configuration.testZoomLevel, configuration.useDarkTheme
+                        )
+                        GeckoViewWrapper.clearRuntimeCaches()
+                    } else {
+                        android.webkit.WebView(requireContext()).apply {
+                            clearCache(true)
+                            clearHistory()
+                            clearFormData()
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                            android.webkit.CookieManager.getInstance().flush()
+                        }
                     }
-                    
-                    // Clear app cache directory
-                    requireContext().cacheDir.deleteRecursively()
-                    requireContext().cacheDir.mkdir()
-                    
-                    // Clear cookies
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
-                        android.webkit.CookieManager.getInstance().flush()
-                    }
-                    
+                    // The dashboard loads again on the way back from the settings screen
+                    configuration.requestBrowserReload()
+
                     Toast.makeText(requireContext(), R.string.toast_cache_cleared, Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     Timber.e(e, "Error clearing cache")

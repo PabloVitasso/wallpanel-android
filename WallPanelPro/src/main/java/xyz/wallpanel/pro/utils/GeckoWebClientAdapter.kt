@@ -16,74 +16,81 @@
 
 package xyz.wallpanel.pro.utils
 
-import android.content.res.Resources
 import androidx.annotation.UiThread
+import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSession.NavigationDelegate
 import org.mozilla.geckoview.GeckoSession.NavigationDelegate.LoadRequest
-import org.mozilla.geckoview.AllowOrDeny
+import org.mozilla.geckoview.WebRequestError
 import timber.log.Timber
-import xyz.wallpanel.pro.R
-import xyz.wallpanel.pro.persistence.Configuration
 import xyz.wallpanel.pro.ui.views.WebClientCallback
 
 /**
- * Adapter class that maps GeckoView's NavigationDelegate to WebViewClient-like behavior
- * This allows GeckoView to work with the existing WebClientCallback interface
+ * Maps GeckoView's NavigationDelegate and ContentDelegate onto the WebClientCallback the
+ * WebView client also reports to.
  */
 class GeckoWebClientAdapter(
-    private val resources: Resources,
-    private val callback: WebClientCallback,
-    private val configuration: Configuration
+    private val callback: WebClientCallback
 ) : NavigationDelegate, GeckoSession.ContentDelegate {
 
-    private var currentUrl = ""
-    private var pageLoaded = false
-    private var geckoSession: GeckoSession? = null
-    
-    /**
-     * Set the GeckoSession for JavaScript execution
-     */
-    fun setGeckoSession(session: GeckoSession) {
-        this.geckoSession = session
-    }
+    /** Whether the page has history to go back to, for the back key. */
+    var canGoBack = false
+        private set
 
+    /**
+     * The page's address as it changes, including the in-page navigation Home Assistant does
+     * between views. Load requests are not used for this: they include redirects, loads that
+     * go on to fail, and the `javascript:` URIs the eval command runs through.
+     */
     @UiThread
-    // Note: onLocationChange signature may have changed in GeckoView 134.+
-    // Keeping as regular method for now - will be called if signature matches
-    fun onLocationChange(
+    override fun onLocationChange(
         session: GeckoSession,
         url: String?,
-        perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>
+        perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
+        hasUserGesture: Boolean
     ) {
-        url?.let {
-            currentUrl = it
-            // Notify page load complete
-            callback.pageLoadComplete(it)
+        if (url.isNullOrEmpty() || url == BLANK_PAGE) {
+            return
         }
+        callback.pageLoadComplete(url)
     }
 
     @UiThread
     override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
-        // Handle back navigation state
+        this.canGoBack = canGoBack
+    }
+
+    /** A new session starts without history, and may not say so before the back key is pressed. */
+    @UiThread
+    fun onSessionReplaced() {
+        canGoBack = false
     }
 
     @UiThread
     override fun onCanGoForward(session: GeckoSession, canGoForward: Boolean) {
-        // Handle forward navigation state
     }
 
+    /**
+     * Web pages load here. Anything else, an `intent:` or an app's own scheme such as `tel:`,
+     * is handed to Android, which is what a tap on such a link means. Gecko would otherwise
+     * try to load it itself and show nothing. Only a load the user started is handed over,
+     * so a page cannot open other apps on its own.
+     */
     @UiThread
     override fun onLoadRequest(
         session: GeckoSession,
         request: LoadRequest
     ): GeckoResult<AllowOrDeny>? {
-        // Track URL changes
-        callback.pageLoadComplete(request.uri)
-        
-        // Returning null allows the load
-        return GeckoResult.allow()
+        if (!isExternalUri(request.uri)) {
+            return GeckoResult.allow()
+        }
+        if (request.hasUserGesture) {
+            callback.openExternally(request.uri)
+        } else {
+            Timber.w("Not opening ${request.uri}, the page asked for it without a tap")
+        }
+        return GeckoResult.deny()
     }
 
     @UiThread
@@ -91,97 +98,48 @@ class GeckoWebClientAdapter(
         session: GeckoSession,
         request: LoadRequest
     ): GeckoResult<AllowOrDeny>? {
-        // Returning null allows the load
         return GeckoResult.allow()
     }
 
+    /**
+     * A kiosk has a single page, so a link meant for a new window opens in this one.
+     */
     @UiThread
     override fun onNewSession(
         session: GeckoSession,
         uri: String
     ): GeckoResult<GeckoSession>? {
-        // Return allow to open in same session
-        return GeckoResult.fromValue(null)
-    }
-
-    fun isCurrentUrl(url: String): Boolean {
-        return url.lowercase().contains(currentUrl.lowercase())
-    }
-
-    /**
-     * Page loading started callback
-     */
-    fun onPageStarted(url: String) {
-        if (isCurrentUrl(url)) {
-            pageLoaded = false
+        if (isExternalUri(uri)) {
+            callback.openExternally(uri)
+        } else {
+            session.loadUri(uri)
         }
+        return null
     }
 
     /**
-     * Page loading finished callback
+     * A page that could not be reached is tried again, the same way the WebView does, so a
+     * dashboard whose server comes up after the tablet (after a power cut, say) loads on its
+     * own. Errors a retry cannot fix, such as a bad certificate, are left on screen.
      */
-    fun onPageFinished(url: String) {
-        if (callback.isConnected) {
-            callback.stopReloadDelay()
+    @UiThread
+    override fun onLoadError(
+        session: GeckoSession,
+        uri: String?,
+        error: WebRequestError
+    ): GeckoResult<String>? {
+        Timber.e("GeckoView could not load $uri: category ${error.category}, code ${error.code}")
+        if (callback.isFinishing() || !isRetryable(error)) {
+            return null
         }
-        if (isCurrentUrl(url)) {
-            pageLoaded = true
-        }
-        
-        // Apply dark mode via JavaScript meta tag injection
-        if (configuration.useDarkTheme) {
-            injectDarkModeMetaTag()
-        }
-        
-        callback.complete()
-    }
-    
-    /**
-     * Inject dark mode meta tag via JavaScript
-     * This works on any GeckoView version and leverages Firefox's native dark mode support
-     */
-    private fun injectDarkModeMetaTag() {
-        val darkModeScript = """
-            (function() {
-                // Set color-scheme meta tag
-                var meta = document.querySelector('meta[name="color-scheme"]');
-                if (!meta) {
-                    meta = document.createElement('meta');
-                    meta.name = 'color-scheme';
-                    document.head.appendChild(meta);
-                }
-                meta.content = 'dark';
-                
-                // Also set it on root element for CSS
-                document.documentElement.style.colorScheme = 'dark';
-            })()
-        """.trimIndent()
-        
-        geckoSession?.loadUri("javascript:$darkModeScript")
-    }
-    
-    private fun disableWebNFCAPI() {
-        val disableNFCScript = """
-            (function() {
-                if ('NDEFReader' in window) {
-                    delete window.NDEFReader;
-                    console.log('[WallPanel] Disabled Web NFC API on page load');
-                }
-            })()
-        """.trimIndent()
-        
-        geckoSession?.loadUri("javascript:$disableNFCScript")
+        callback.isConnected = false
+        callback.startReloadDelay()
+        return GeckoResult.fromValue(ERROR_PAGE)
     }
 
-    /**
-     * Handle navigation errors
-     */
-    fun onReceivedError(errorCode: Int, description: String?, failingUrl: String?) {
-        Timber.e("GeckoView navigation error: $description at $failingUrl")
-        if (!callback.isFinishing()) {
-            callback.isConnected = false
-            callback.startReloadDelay()
-        }
+    @UiThread
+    override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) {
+        callback.onPageFullScreen(fullScreen)
     }
 
     /**
@@ -215,5 +173,29 @@ class GeckoWebClientAdapter(
         }
         callback.isConnected = false
         callback.recreateGeckoSession()
+    }
+
+    private fun isRetryable(error: WebRequestError): Boolean {
+        return error.category == WebRequestError.ERROR_CATEGORY_NETWORK ||
+                error.category == WebRequestError.ERROR_CATEGORY_PROXY ||
+                error.code == WebRequestError.ERROR_UNKNOWN_HOST
+    }
+
+    companion object {
+        private const val BLANK_PAGE = "about:blank"
+
+        // The WebView's error page, read from the APK's assets.
+        const val ERROR_PAGE = "resource://android/assets/error_page.html"
+
+        private val BROWSER_SCHEMES = setOf(
+            "http", "https", "about", "data", "blob", "javascript", "file", "resource",
+            "moz-extension", "view-source"
+        )
+
+        /** True for a URI the browser cannot show and another app has to open. */
+        fun isExternalUri(uri: String): Boolean {
+            val scheme = uri.substringBefore(':', "").lowercase()
+            return scheme.isNotEmpty() && scheme !in BROWSER_SCHEMES
+        }
     }
 }

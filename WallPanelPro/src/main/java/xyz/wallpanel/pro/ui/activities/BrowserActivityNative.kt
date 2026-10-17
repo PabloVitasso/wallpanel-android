@@ -18,6 +18,8 @@ package xyz.wallpanel.pro.ui.activities
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.KeyguardManager
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -25,14 +27,18 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.net.ConnectivityManager
+import android.net.Uri
 import android.provider.Browser
 import android.view.*
 import android.webkit.*
 import android.widget.Button
 import android.widget.Toast
 import androidx.annotation.RequiresApi
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.coordinatorlayout.widget.CoordinatorLayout
@@ -47,11 +53,13 @@ import xyz.wallpanel.pro.utils.BootReadinessGate
 import xyz.wallpanel.pro.utils.InternalWebChromeClient
 import xyz.wallpanel.pro.ui.views.WebClientCallback
 import xyz.wallpanel.pro.utils.InternalWebClient
+import xyz.wallpanel.pro.utils.OverlayPermission
 import xyz.wallpanel.pro.utils.GeckoWebClientAdapter
 import xyz.wallpanel.pro.utils.GeckoWebChromeClientAdapter
 import xyz.wallpanel.pro.ui.views.GeckoViewWrapper
 import xyz.wallpanel.pro.BuildConfig
 import xyz.wallpanel.pro.R
+import org.mozilla.geckoview.GeckoSession
 import timber.log.Timber
 import java.net.URISyntaxException
 import java.util.*
@@ -78,6 +86,34 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
     private var awaitingReconnect = false
     private var browserEnginePaused = false
     private var pendingGeckoReloadOnResume = false
+    // A clock, wallpaper or web screensaver is hiding the page
+    private var screenSaverCovering = false
+    // How far the GeckoView page is scrolled down, for the pull-to-refresh gesture
+    private var geckoScrollY = 0
+    // A page element, a video for instance, is showing fullscreen
+    private var pageFullScreen = false
+    // The page's upload field waiting on the file picker
+    private var pendingFilePick: ((Array<Uri>?) -> Unit)? = null
+
+    private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val onResult = pendingFilePick ?: return@registerForActivityResult
+        pendingFilePick = null
+        val data = result.data
+        val uris = if (result.resultCode != RESULT_OK || data == null) {
+            null
+        } else {
+            val clip = data.clipData
+            if (clip != null) {
+                Array(clip.itemCount) { clip.getItemAt(it).uri }
+            } else {
+                data.data?.let { arrayOf(it) }
+            }
+        }
+        onResult(uris)
+    }
+    // Android permission requests made for a page, by request code
+    private val pagePermissionRequests = mutableMapOf<Int, (Boolean) -> Unit>()
+    private var nextPagePermissionRequestCode = PERMISSIONS_REQUEST_PAGE_FIRST
 
     private val reloadPageRunnable = Runnable {
         initWebPageLoad()
@@ -87,6 +123,8 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
     private var bootGate: BootReadinessGate? = null
     // A URL sent by command during that wait, loaded in place of the launch URL afterwards
     private var urlDeferredByBootGate: String? = null
+    // A url command that arrived while the GeckoView page was waiting for the screen to load
+    private var urlDeferredBySuspend: String? = null
 
     private val bootGateRunnable = object : Runnable {
         override fun run() {
@@ -126,8 +164,14 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
     // burning that CPU. Rather than wait to be killed, tear the session down deliberately
     // once the screen has been off longer than the configured grace period.
     private val geckoSuspendRunnable = Runnable {
-        if (!isFinishing && usingGeckoView && browserEnginePaused) {
+        // Only a dark screen: with the screen on, the page is behind something the user is
+        // using, a file picker for the page's upload field or a permission dialog, and tearing
+        // the session down would reload the page under it. A screen that goes off later pauses
+        // the engine again, which schedules this once more.
+        val screenOn = (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+        if (!isFinishing && usingGeckoView && browserEnginePaused && !screenOn) {
             geckoViewWrapper?.suspend()
+            onGeckoSessionReplaced()
             pendingGeckoReloadOnResume = true
         }
     }
@@ -194,6 +238,48 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
         configureWebView(binding.root)
         loadWhenDeviceReady()
         requestNotificationPermissions()
+        requestOverlayPermission()
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                goBack()
+            }
+        })
+    }
+
+    /**
+     * The back key moves back through the page's history, or out of a fullscreen video. With
+     * nowhere to go back to it does nothing: leaving the browser is not something a kiosk
+     * should do on a single key press.
+     */
+    private fun goBack() {
+        if (usingGeckoView) {
+            val session = geckoViewWrapper?.geckoSession
+            when {
+                pageFullScreen -> session?.exitFullScreen()
+                geckoClientAdapter?.canGoBack == true -> session?.goBack()
+            }
+        } else if (webView?.canGoBack() == true) {
+            webView?.goBack()
+        }
+    }
+
+    /**
+     * Asked once, on devices where it matters: without it, a crash or restart while the screen
+     * is on leaves the device on the launcher, see [OverlayPermission]. It can be granted
+     * later from the settings screen.
+     */
+    private fun requestOverlayPermission() {
+        if (configuration.overlayPermissionShown || OverlayPermission.isGranted(this)) {
+            return
+        }
+        configuration.overlayPermissionShown = true
+        AlertDialog.Builder(this)
+            .setTitle(R.string.dialog_overlay_permission_title)
+            .setMessage(R.string.dialog_overlay_permission_message)
+            .setPositiveButton(android.R.string.ok) { _, _ -> OverlayPermission.openSettings(this) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     override fun onResume() {
@@ -231,6 +317,11 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        pagePermissionRequests.remove(requestCode)?.let { onResult ->
+            // An empty result means the request was cancelled
+            onResult(grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED })
+            return
+        }
         if (requestCode == PERMISSIONS_REQUEST_NOTIFICATIONS) {
             // If request is cancelled, the result arrays are empty.
             if (grantResults.isEmpty() || grantResults.any { it != PackageManager.PERMISSION_GRANTED }) {
@@ -263,19 +354,25 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
             webView?.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }
         // Note: GeckoView handles hardware acceleration internally
+        if (usingGeckoView) {
+            GeckoViewWrapper.setDarkTheme(configuration.useDarkTheme)
+        }
 
         if (configuration.browserRefresh) {
+            binding.swipeContainer.isEnabled = true
             binding.swipeContainer.setOnRefreshListener {
                 initWebPageLoad()
             }
-            mOnScrollChangedListener = ViewTreeObserver.OnScrollChangedListener {
-                if (usingGeckoView) {
-                    binding.swipeContainer.isEnabled = binding.activityBrowserGeckoview.scrollY == 0
-                } else {
+            if (usingGeckoView) {
+                // Gecko scrolls the page inside its view, so the view's own scroll position
+                // stays at zero; the page's, reported by the scroll delegate, is what counts.
+                binding.swipeContainer.setOnChildScrollUpCallback { _, _ -> geckoScrollY > 0 }
+            } else {
+                mOnScrollChangedListener = ViewTreeObserver.OnScrollChangedListener {
                     binding.swipeContainer.isEnabled = webView?.scrollY == 0
                 }
+                binding.swipeContainer.viewTreeObserver.addOnScrollChangedListener(mOnScrollChangedListener)
             }
-            binding.swipeContainer.viewTreeObserver.addOnScrollChangedListener(mOnScrollChangedListener)
         } else {
             binding.swipeContainer.isEnabled = false
         }
@@ -298,6 +395,17 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
         super.onDestroy()
         reconnectionHandler.removeCallbacks(bootGateRunnable)
         codeBottomSheet?.dismiss()
+        codeBottomSheet = null
+        // Closing the session lets Gecko drop its references to this activity's view, which
+        // otherwise outlive it.
+        geckoViewWrapper?.destroy()
+        geckoViewWrapper = null
+        // Answered as refused, so the page is not left waiting on a request that is gone
+        val unanswered = pagePermissionRequests.values.toList()
+        pagePermissionRequests.clear()
+        unanswered.forEach { it(false) }
+        pendingFilePick?.invoke(null)
+        pendingFilePick = null
     }
 
     /**
@@ -328,7 +436,7 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
         browserEnginePaused = false
         if (usingGeckoView) {
             reconnectionHandler.removeCallbacks(geckoSuspendRunnable)
-            geckoViewWrapper?.setActive(true)
+            geckoViewWrapper?.setActive(!screenSaverCovering)
             reloadGeckoIfPending()
         } else {
             webView?.onResume()
@@ -340,54 +448,72 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
      * Bring the page back after either a deliberate suspend() (no session at all) or a
      * recreateGeckoSession() that deferred its reload while the screen was off (an empty
      * but open session).
-     * Either way the dashboard needs loading once the screen wakes.
+     * Either way the page needs loading once the screen wakes: the dashboard, or the url a
+     * command asked for in the meantime.
      */
     private fun reloadGeckoIfPending() {
         if (!pendingGeckoReloadOnResume) {
             return
         }
         pendingGeckoReloadOnResume = false
+        val deferredUrl = urlDeferredBySuspend
+        urlDeferredBySuspend = null
         val wrapper = geckoViewWrapper ?: return
-        if (wrapper.geckoSession == null && wrapper.recreateSession()) {
-            wrapper.geckoSession?.let { session ->
-                geckoClientAdapter?.setGeckoSession(session)
-            }
+        if (wrapper.geckoSession == null) {
+            wrapper.recreateSession()
+            onGeckoSessionReplaced()
         }
-        initWebPageLoad()
+        if (deferredUrl == null) {
+            initWebPageLoad()
+        } else {
+            prepareWebPageLoad()
+            loadWebViewUrl(deferredUrl)
+        }
     }
 
+    /**
+     * The page state reported by the old session went with it. A new session reports none of
+     * it until it changes, and a fullscreen left standing would keep the settings button
+     * hidden, pull-to-refresh off and the back key exiting a fullscreen that is not there.
+     */
+    private fun onGeckoSessionReplaced() {
+        geckoScrollY = 0
+        geckoClientAdapter?.onSessionReplaced()
+        onPageFullScreen(false)
+    }
+
+    /**
+     * The service is left running: MQTT and HTTP stay reachable while the settings are open,
+     * and the service picks up their changes when the screen closes. On a device with a PIN or
+     * pattern lock, the device credential is asked for here, over the dashboard, before the
+     * settings open. Opened behind the lock screen instead, they would leave the kiosk there if
+     * nobody unlocked it.
+     */
     override fun openSettings() {
         hideScreenSaver()
-        // Stop our service for performance reasons and to pick up changes
-        stopService(wallPanelService)
-        val intent = SettingsActivity.createStartIntent(this)
-        startActivity(intent)
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && keyguardManager.isKeyguardLocked && keyguardManager.isKeyguardSecure) {
+            keyguardManager.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() {
+                    startActivity(SettingsActivity.createStartIntent(this@BrowserActivityNative))
+                }
+            })
+            return
+        }
+        startActivity(SettingsActivity.createStartIntent(this))
     }
 
     override fun loadWebViewUrl(url: String) {
         if (url.startsWith("intent:")) {
-            val launchIntent: Intent
-            try {
-                launchIntent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
-            } catch (ex: URISyntaxException) {
-                Timber.e("Bad URI $url: $ex.message")
-                val context = if (usingGeckoView) binding.activityBrowserGeckoview.context else webView?.context
-                context?.let {
-                    dialogUtils.showAlertDialog(it, resources.getString(R.string.dialog_message_invalid_intent))
-                }
-                return
-            }
-            val selector = launchIntent.selector
-            if (selector != null) {
-                selector.addCategory(Intent.CATEGORY_BROWSABLE)
-                selector.setComponent(null)
-            }
-            val context = if (usingGeckoView) binding.activityBrowserGeckoview.context else webView?.context
-            launchIntent.putExtra(Browser.EXTRA_APPLICATION_ID, context?.packageName)
-            context?.startActivity(launchIntent)
+            openExternally(url)
         } else if (bootGate != null) {
             Timber.i("Holding $url until the device is ready")
             urlDeferredByBootGate = url
+        } else if (usingGeckoView && pendingGeckoReloadOnResume) {
+            // The session is closed, or open and left empty until the screen wakes, which
+            // loads the dashboard over anything loaded now. The url is loaded then instead.
+            Timber.i("Holding $url until the screen wakes")
+            urlDeferredBySuspend = url
         } else {
             if (usingGeckoView) {
                 geckoViewWrapper?.loadUrl(url)
@@ -407,7 +533,7 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
 
     override fun clearCache() {
         if (usingGeckoView) {
-            geckoViewWrapper?.clearCache(true)
+            GeckoViewWrapper.clearRuntimeCaches()
         } else {
             webView?.clearCache(true)
             webView?.clearHistory()
@@ -544,12 +670,10 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
                 return@post
             }
             if (wrapper.recreateSession()) {
-                wrapper.geckoSession?.let { session ->
-                    geckoClientAdapter?.setGeckoSession(session)
-                }
+                onGeckoSessionReplaced()
                 // A fresh session starts out visible, so a kill that happens while the
                 // screen is off would otherwise leave the page running at full rate again
-                wrapper.setActive(browserEnginePaused.not())
+                wrapper.setActive(!browserEnginePaused && !screenSaverCovering)
                 if (browserEnginePaused) {
                     // Reloading the dashboard behind a dark screen re-arms the CPU burn that
                     // got the content process killed, so the empty session is left alone until
@@ -559,6 +683,128 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
                     initWebPageLoad()
                 }
             }
+        }
+    }
+
+    /**
+     * Stops a hidden page from running at full rate, which is also what releases the screen
+     * wake lock GeckoView holds while a video plays; a live camera card would otherwise keep
+     * the display on for good. The page picks up where it was when the screensaver goes.
+     */
+    override fun onScreenSaverCovering(covering: Boolean) {
+        if (covering == screenSaverCovering) {
+            return
+        }
+        screenSaverCovering = covering
+        if (usingGeckoView && !browserEnginePaused) {
+            geckoViewWrapper?.setActive(!covering)
+        }
+    }
+
+    override fun openExternally(url: String): Boolean {
+        val launchIntent = if (url.startsWith("intent:")) {
+            try {
+                Intent.parseUri(url, Intent.URI_INTENT_SCHEME).apply {
+                    // An intent from a web page may only reach browsable activities
+                    selector?.let { selector ->
+                        selector.addCategory(Intent.CATEGORY_BROWSABLE)
+                        selector.component = null
+                    }
+                    putExtra(Browser.EXTRA_APPLICATION_ID, packageName)
+                }
+            } catch (ex: URISyntaxException) {
+                Timber.e("Bad URI $url: ${ex.message}")
+                dialogUtils.showAlertDialog(this, resources.getString(R.string.dialog_message_invalid_intent))
+                return false
+            }
+        } else {
+            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        }
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            startActivity(launchIntent)
+            true
+        } catch (e: ActivityNotFoundException) {
+            Timber.w("No app opens $url")
+            Toast.makeText(this, R.string.toast_no_app_for_link, Toast.LENGTH_SHORT).show()
+            false
+        } catch (e: SecurityException) {
+            Timber.w(e, "Not allowed to open $url")
+            Toast.makeText(this, R.string.toast_no_app_for_link, Toast.LENGTH_SHORT).show()
+            false
+        }
+    }
+
+    override fun requestAndroidPermissions(permissions: Array<String>, onResult: (Boolean) -> Unit) {
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            onResult(true)
+            return
+        }
+        val requestCode = nextPagePermissionRequestCode++
+        if (nextPagePermissionRequestCode > PERMISSIONS_REQUEST_PAGE_LAST) {
+            nextPagePermissionRequestCode = PERMISSIONS_REQUEST_PAGE_FIRST
+        }
+        pagePermissionRequests[requestCode] = onResult
+        ActivityCompat.requestPermissions(this, missing.toTypedArray(), requestCode)
+    }
+
+    /**
+     * Gecko draws the fullscreen element across the whole view itself. What is left is the
+     * application's own chrome: the settings button is hidden, the system bars too even when
+     * the dashboard is not set to fullscreen, and pull-to-refresh is off so a swipe on a video
+     * does not reload the page.
+     */
+    override fun onPageFullScreen(fullScreen: Boolean) {
+        if (fullScreen == pageFullScreen) {
+            return
+        }
+        pageFullScreen = fullScreen
+        if (fullScreen) {
+            binding.launchSettingsFab.visibility = View.GONE
+            binding.swipeContainer.isEnabled = false
+        } else {
+            setupSettingsButton()
+            binding.swipeContainer.isEnabled = configuration.browserRefresh
+        }
+        onWindowFocusChanged(hasWindowFocus())
+    }
+
+    override fun geckoPageStarted() {
+        geckoScrollY = 0
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && pageFullScreen) {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+        }
+    }
+
+    override fun pickFiles(mimeTypes: Array<String>, multiple: Boolean, onResult: (Array<Uri>?) -> Unit) {
+        pendingFilePick?.invoke(null)
+        pendingFilePick = onResult
+        val intent = Intent(Intent.ACTION_GET_CONTENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType(if (mimeTypes.size == 1) mimeTypes[0] else "*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
+        if (mimeTypes.size > 1) {
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
+        }
+        try {
+            filePicker.launch(intent)
+        } catch (e: ActivityNotFoundException) {
+            Timber.w(e, "No file picker on this device")
+            pendingFilePick = null
+            onResult(null)
         }
     }
 
@@ -612,7 +858,7 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
                 binding.activityBrowserGeckoview.visibility = View.VISIBLE
 
                 // Initialize GeckoRuntime (if not already initialized)
-                GeckoViewWrapper.initializeRuntime(this)
+                GeckoViewWrapper.initializeRuntime(this, zoomLevel, configuration.useDarkTheme)
 
                 // Initialize GeckoView wrapper
                 geckoViewWrapper = GeckoViewWrapper(this, binding.activityBrowserGeckoview)
@@ -625,7 +871,7 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
                 usingGeckoView = false
                 configuration.useGeckoView = false
                 configureSystemWebView()
-                Toast.makeText(this, "GeckoView failed, using WebView", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, R.string.toast_geckoview_failed, Toast.LENGTH_LONG).show()
             }
         } else {
             // Hide GeckoView, show WebView
@@ -660,15 +906,16 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
     }
 
     private fun configureGeckoViewDelegates() {
-        val clientAdapter = GeckoWebClientAdapter(resources, this, configuration)
-        val geckoChromeAdapter = GeckoWebChromeClientAdapter(resources, this)
+        val clientAdapter = GeckoWebClientAdapter(this)
         geckoClientAdapter = clientAdapter
-
-        // Pass the GeckoSession to the adapter for JavaScript execution
-        geckoViewWrapper?.geckoSession?.let { session ->
-            clientAdapter.setGeckoSession(session)
-        }
-
+        val geckoChromeAdapter = GeckoWebChromeClientAdapter(this, this)
+        // Where the "show browser activity" loading progress is shown
+        geckoChromeAdapter.setGeckoView(binding.activityBrowserGeckoview)
+        geckoViewWrapper?.setScrollDelegate(object : GeckoSession.ScrollDelegate {
+            override fun onScrollChanged(session: GeckoSession, scrollX: Int, scrollY: Int) {
+                geckoScrollY = scrollY
+            }
+        })
         geckoViewWrapper?.setNavigationDelegate(clientAdapter)
         // The content delegate reports crashes and OS kills of the content process
         geckoViewWrapper?.setContentDelegate(clientAdapter)
@@ -771,6 +1018,7 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
             object : CodeBottomSheetFragment.OnAlarmCodeFragmentListener {
                 override fun onComplete(code: String) {
                     codeBottomSheet?.dismiss()
+                    codeBottomSheet = null
                     openSettings()
                 }
 
@@ -784,6 +1032,7 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
 
                 override fun onCancel() {
                     codeBottomSheet?.dismiss()
+                    codeBottomSheet = null
                 }
             })
         codeBottomSheet?.show(supportFragmentManager, codeBottomSheet?.tag)
@@ -841,6 +1090,9 @@ class BrowserActivityNative : BaseBrowserActivity(), LifecycleObserver, WebClien
 
     companion object {
         const val PERMISSIONS_REQUEST_NOTIFICATIONS = 220
+        // Request codes for permissions a page asks for, taken in turn
+        private const val PERMISSIONS_REQUEST_PAGE_FIRST = 300
+        private const val PERMISSIONS_REQUEST_PAGE_LAST = 399
         private const val BOOT_GATE_POLL_MS = 1000L
     }
 }
