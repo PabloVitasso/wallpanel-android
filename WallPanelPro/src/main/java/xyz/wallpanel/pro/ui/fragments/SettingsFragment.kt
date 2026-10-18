@@ -24,6 +24,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Menu
 import android.view.MenuInflater
@@ -46,10 +48,12 @@ import xyz.wallpanel.pro.persistence.Configuration.Companion.PREF_SCREEN_BRIGHTN
 import xyz.wallpanel.pro.ui.activities.SettingsActivity.Companion.PERMISSIONS_REQUEST_WRITE_SETTINGS
 import xyz.wallpanel.pro.ui.views.GeckoViewWrapper
 import xyz.wallpanel.pro.ui.views.SettingsCodeView
+import xyz.wallpanel.pro.utils.BrowserMetricsCleaner
 import xyz.wallpanel.pro.utils.DateUtils
 import xyz.wallpanel.pro.utils.DateUtils.SECONDS_VALUE
 import xyz.wallpanel.pro.utils.OverlayPermission
 import xyz.wallpanel.pro.utils.ScreenUtils
+import xyz.wallpanel.pro.utils.WebViewVersion
 import dagger.android.support.AndroidSupportInjection
 import timber.log.Timber
 import javax.inject.Inject
@@ -79,6 +83,8 @@ class SettingsFragment : BaseSettingsFragment() {
     private var aboutPreference: Preference? = null
     private var brightnessPreference: Preference? = null
     private var clearCachePreference: Preference? = null
+    private var webViewMetricsPreference: ListPreference? = null
+    private var clearWebViewMetricsPreference: Preference? = null
     private var overlayPermissionPreference: Preference? = null
     private var browserRefreshPreference: SwitchPreference? = null
 
@@ -260,6 +266,15 @@ class SettingsFragment : BaseSettingsFragment() {
         overlayPermissionPreference = findPreference("button_overlay_permission")
         overlayPermissionPreference?.isVisible = OverlayPermission.isNeeded()
 
+        webViewMetricsPreference = findPreference(getString(R.string.key_setting_webview_metrics_mode))
+        clearWebViewMetricsPreference = findPreference("button_clear_webview_metrics")
+        webViewMetricsPreference?.value = configuration.webViewMetricsMode
+        // Hidden until the files are actually there. A WebView that cleans up
+        // after itself leaves nothing to find, so most devices never see this.
+        webViewMetricsPreference?.isVisible = false
+        clearWebViewMetricsPreference?.isVisible = false
+        refreshWebViewMetricsSummary()
+
         rotationPreference = findPreference("pref_settings_image_rotation")
         rotationPreference?.text = configuration.imageRotation.toString()
         rotationPreference?.summary = getString(R.string.preference_summary_image_rotation, configuration.imageRotation.toString())
@@ -328,6 +343,11 @@ class SettingsFragment : BaseSettingsFragment() {
             
             clearCachePreference?.onPreferenceClickListener = Preference.OnPreferenceClickListener {
                 clearBrowserCache()
+                true
+            }
+
+            clearWebViewMetricsPreference?.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+                clearWebViewMetrics()
                 true
             }
 
@@ -606,6 +626,85 @@ class SettingsFragment : BaseSettingsFragment() {
         requireActivity().recreate()
     }
     
+    /**
+     * Counts the WebView metrics files, then shows the two preferences if any
+     * exist and writes the count into the summary.
+     *
+     * The count comes off a background thread: StrictMode watches main-thread
+     * disk reads in debug builds, and a full directory can hold hundreds of
+     * entries.
+     */
+    private fun refreshWebViewMetricsSummary() {
+        val context = context
+        if (context == null) {
+            return
+        }
+        val applicationContext = context.applicationContext
+        Thread {
+            val usage = BrowserMetricsCleaner.scan(applicationContext)
+            val version = WebViewVersion.major(applicationContext)
+            Handler(Looper.getMainLooper()).post {
+                showWebViewMetrics(usage, version)
+            }
+        }.start()
+    }
+
+    private fun showWebViewMetrics(usage: BrowserMetricsCleaner.Usage, version: Int?) {
+        if (!isAdded) {
+            return
+        }
+        val visible = usage.count > 0
+        webViewMetricsPreference?.isVisible = visible
+        clearWebViewMetricsPreference?.isVisible = visible
+        if (!visible) {
+            return
+        }
+        val amount = resources.getQuantityString(
+            R.plurals.webview_metrics_usage, usage.count, usage.count, usage.megabytes
+        )
+        if (version == null) {
+            webViewMetricsPreference?.summary =
+                getString(R.string.summary_setting_webview_metrics_no_version, amount)
+            return
+        }
+        webViewMetricsPreference?.summary =
+            getString(R.string.summary_setting_webview_metrics, version.toString(), amount)
+    }
+
+    /** Deletes the metrics files once. Changes no setting. */
+    private fun clearWebViewMetrics() {
+        val context = context
+        if (context == null) {
+            return
+        }
+        val applicationContext = context.applicationContext
+        Thread {
+            val removed = BrowserMetricsCleaner.clean(applicationContext)
+            Handler(Looper.getMainLooper()).post {
+                reportWebViewMetricsCleared(removed)
+            }
+        }.start()
+    }
+
+    private fun reportWebViewMetricsCleared(removed: BrowserMetricsCleaner.Usage) {
+        if (!isAdded) {
+            return
+        }
+        if (removed.count == 0) {
+            Toast.makeText(requireContext(), R.string.toast_webview_metrics_none, Toast.LENGTH_SHORT)
+                .show()
+            return
+        }
+        val message = resources.getQuantityString(
+            R.plurals.toast_webview_metrics_cleared,
+            removed.count,
+            removed.count,
+            removed.megabytes
+        )
+        Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show()
+        refreshWebViewMetricsSummary()
+    }
+
     private fun clearBrowserCache() {
         AlertDialog.Builder(requireContext())
             .setTitle(R.string.pref_clear_cache_title)

@@ -371,6 +371,19 @@ constructor(private val context: Context, private val sharedPreferences: SharedP
             sharedPreferences.edit().putBoolean(context.getString(R.string.key_pref_browser_refresh), value).apply()
         }
 
+    // What to do with the Chromium histogram files WebView leaves in the app's
+    // data directory. See BrowserMetricsCleaner for why they pile up.
+    var webViewMetricsMode: String
+        get() = getStringPref(
+            R.string.key_setting_webview_metrics_mode,
+            R.string.default_setting_webview_metrics_mode
+        )
+        set(value) {
+            sharedPreferences.edit()
+                .putString(context.getString(R.string.key_setting_webview_metrics_mode), value)
+                .apply()
+        }
+
     var useGeckoView: Boolean
         get() = getBoolPref(R.string.key_use_geckoview, R.string.default_use_geckoview)
         set(value) {

@@ -500,5 +500,26 @@
         <item>3</item>
     </string-array>
 
+    <string name="title_setting_webview_metrics">WebView Metrics Files</string>
+    <string name="summary_setting_webview_metrics">WebView %1$s does not remove these files. Affects the WebView browser and the web screensaver, not GeckoView. Currently %2$s.</string>
+    <string name="summary_setting_webview_metrics_no_version">WebView does not remove these files. Affects the WebView browser and the web screensaver, not GeckoView. Currently %1$s.</string>
+    <plurals name="webview_metrics_usage">
+        <item quantity="one">%1$d file using %2$d MB</item>
+        <item quantity="other">%1$d files using %2$d MB</item>
+    </plurals>
+
+    <string name="title_clear_webview_metrics">Clear Metrics Files Now</string>
+    <string name="summary_clear_webview_metrics">Deletes the metrics files once and reports the space freed. Changes no setting.</string>
+    <plurals name="toast_webview_metrics_cleared">
+        <item quantity="one">Deleted %1$d file and freed %2$d MB.</item>
+        <item quantity="other">Deleted %1$d files and freed %2$d MB.</item>
+    </plurals>
+    <string name="toast_webview_metrics_none">There were no metrics files to delete.</string>
+
+    <string-array name="webview_metrics_mode_names">
+        <item>Off</item>
+        <item>Delete on each start</item>
+        <item>Delete and stop new files</item>
+    </string-array>
 
 </resources>

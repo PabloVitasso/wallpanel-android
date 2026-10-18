@@ -29,6 +29,8 @@
     <string name="key_setting_android_browsertype">setting_android_browsertype</string>
     <string name="key_settings_sensors_light">setting_sensors_light</string>
     <string name="key_setting_test_zoomlevel">setting_test_zoomlevel</string>
+    <string name="key_setting_webview_metrics_mode">setting_webview_metrics_mode</string>
+    <string name="default_setting_webview_metrics_mode">off</string>
     <string name="key_settings_sensors_magneticField">setting_sensors_magneticField</string>
     <string name="key_settings_sensors_temperature">setting_sensors_temperature</string>
     <string name="key_settings_sensors_pressure">setting_sensors_pressure</string>
@@ -343,6 +345,12 @@
     <string-array name="mqtt_version_values">
         <item>5.0</item>
         <item>3.1.1</item>
+    </string-array>
+
+    <string-array name="webview_metrics_mode_values">
+        <item>off</item>
+        <item>delete</item>
+        <item>delete_and_block</item>
     </string-array>
 
 </resources>

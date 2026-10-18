@@ -129,6 +129,19 @@
             android:summary="Clears browser cache, history, and cookies to force a fresh page load."
             android:key="button_clear_cache"/>
 
+        <ListPreference
+            android:defaultValue="@string/default_setting_webview_metrics_mode"
+            android:entries="@array/webview_metrics_mode_names"
+            android:entryValues="@array/webview_metrics_mode_values"
+            android:key="@string/key_setting_webview_metrics_mode"
+            android:summary="@string/summary_setting_webview_metrics_no_version"
+            android:title="@string/title_setting_webview_metrics"/>
+
+        <Preference
+            android:key="button_clear_webview_metrics"
+            android:summary="@string/summary_clear_webview_metrics"
+            android:title="@string/title_clear_webview_metrics"/>
+
     </PreferenceCategory>
 
     <PreferenceCategory android:title="Settings Button">

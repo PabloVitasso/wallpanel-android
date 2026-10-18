@@ -57,6 +57,7 @@ import xyz.wallpanel.pro.ui.activities.BaseBrowserActivity.Companion.BROADCAST_A
 import xyz.wallpanel.pro.ui.activities.BaseBrowserActivity.Companion.BROADCAST_ACTION_HIDE_SCREENSAVER
 import xyz.wallpanel.pro.ui.activities.BaseBrowserActivity.Companion.BROADCAST_ACTION_SHOW_SCREENSAVER
 import xyz.wallpanel.pro.utils.AppRestartHelper
+import xyz.wallpanel.pro.utils.BrowserMetricsCleaner
 import xyz.wallpanel.pro.utils.MqttUtils
 import xyz.wallpanel.pro.utils.MqttUtils.Companion.COMMAND_AUDIO
 import xyz.wallpanel.pro.utils.MqttUtils.Companion.COMMAND_BRIGHTNESS
@@ -294,6 +295,28 @@ class WallPanelService : LifecycleService(), MQTTModule.MQTTListener {
         // Safety net for the alarms: they are dropped on reboot and on a system initiated
         // clear of the application's data, so they are re-armed whenever the service starts.
         ScheduledTaskAlarmScheduler.scheduleAll(applicationContext, scheduleRepository)
+
+        cleanWebViewMetrics()
+    }
+
+    /**
+     * Removes the WebView histogram files, when the user has asked for it.
+     *
+     * Off by default, so this does nothing unless the setting was changed.
+     *
+     * Runs on a background thread, because a full directory can hold hundreds
+     * of entries and StrictMode watches main-thread disk writes in debug
+     * builds. Nothing has to finish before the browser starts: deleting a
+     * mapped file is safe, as the file lives until the last process unmaps it.
+     */
+    private fun cleanWebViewMetrics() {
+        val mode = configuration.webViewMetricsMode
+        if (mode == BrowserMetricsCleaner.MODE_OFF) {
+            return
+        }
+        Thread {
+            BrowserMetricsCleaner.apply(applicationContext, mode)
+        }.start()
     }
 
     /**
