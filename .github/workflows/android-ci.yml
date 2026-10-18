@@ -18,9 +18,6 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-      
     - name: Decode Keystore
       run: |
         echo "${{ secrets.SIGNING_KEY }}" | base64 -d > release-keystore.jks
